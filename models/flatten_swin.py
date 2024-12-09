@@ -192,8 +192,13 @@ class FocusedLinearAttention(nn.Module):
 
         self.softmax = nn.Softmax(dim=-1)
 
-        self.dwc = nn.Conv2d(in_channels=head_dim, out_channels=head_dim, kernel_size=kernel_size,
-                             groups=head_dim, padding=kernel_size // 2)
+        self.residual = nn.Sequential(
+            nn.Conv1d(dim, dim, kernel_size=1, groups=num_heads),
+            nn.GELU(),
+            nn.Conv1d(dim, dim * 9, kernel_size=1, groups=num_heads)
+        )
+        # self.dwc = nn.Conv2d(in_channels=head_dim, out_channels=head_dim, kernel_size=kernel_size,
+        #                      groups=head_dim, padding=kernel_size // 2)
         self.scale = nn.Parameter(torch.zeros(size=(1, 1, dim)))
         self.positional_encoding = nn.Parameter(torch.zeros(size=(1, window_size[0] * window_size[1], dim)))
         print('Linear Attention window{} f{} kernel{}'.
@@ -227,14 +232,20 @@ class FocusedLinearAttention(nn.Module):
         k = k.reshape(B, N, self.num_heads, -1).permute(0, 2, 1, 3)
         v = v.reshape(B, N, self.num_heads, -1).permute(0, 2, 1, 3)
 
+        res_weight = self.residual(x.mean(dim=1).unsqueeze(dim=-1)).reshape(B * C, 1, 3, 3)
+        
         z = 1 / (q @ k.mean(dim=-2, keepdim=True).transpose(-2, -1) + 1e-6)
         kv = (k.transpose(-2, -1) * (N ** -0.5)) @ (v * (N ** -0.5))
         x = q @ kv * z
 
         H = W = int(N ** 0.5)
         x = x.transpose(1, 2).reshape(B, N, C)
-        v = v.reshape(B * self.num_heads, H, W, -1).permute(0, 3, 1, 2)
-        x = x + self.dwc(v).reshape(B, C, N).permute(0, 2, 1)
+        
+        v = v.transpose(1, 2).reshape(B, H, W, C).permute(0, 3, 1, 2).reshape(1, B * C, H, W)
+        residual = F.conv2d(v, res_weight, None, padding=(1, 1), groups=B * C)
+        x = x + residual.reshape(B, C, N).permute(0, 2, 1)
+        # v = v.reshape(B * self.num_heads, H, W, -1).permute(0, 3, 1, 2)
+        # x = x + self.dwc(v).reshape(B, C, N).permute(0, 2, 1)
 
         x = self.proj(x)
         x = self.proj_drop(x)
